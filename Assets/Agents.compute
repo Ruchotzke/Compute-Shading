@@ -1,0 +1,170 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel UpdateAgents
+#pragma kernel Blur
+#pragma kernel UpdateTexture
+
+// Define constants for shader modifiers (we could pass them in but why bother)
+#define KERNEL_SIZE 3
+
+// Define prototypes for used functions
+float random(float2 p);
+
+// Render Arguments
+uint ImageX;
+uint ImageY;
+float DeltaTime;
+float AgentSpeed;
+
+// Agent Arguments
+uint NumAgents;
+RWStructuredBuffer<float2> AgentPositions;
+RWStructuredBuffer<float> AgentDirections;
+
+
+// Blur Arguments
+RWTexture2D<float4> ToBlur;
+RWTexture2D<float4> BlurResult;
+
+// Texture Arguments
+RWTexture2D<float4> PrevCycle;
+RWTexture2D<float4> OutputTex;
+float EvaporationSpeed;
+
+[numthreads(1, 1, 1)]
+void UpdateAgents(uint3 id : SV_DispatchThreadID)
+{
+    // Simple Update - before bounds check
+    float2 direction = float2(cos(AgentDirections[id.x]), sin(AgentDirections[id.x]));
+    float2 newPosition = AgentPositions[id.x] + direction * AgentSpeed * DeltaTime;
+    
+    // Perform a bounds check
+    uint numupdates = 0;
+    if (newPosition.x <= 0)
+    {
+        direction = reflect(direction, float2(1.0f, 0.0f));
+        AgentDirections[id.x] = atan2(direction.y, direction.x);
+        numupdates += 1;
+    }
+    else if (newPosition.x >= ImageX - 1)
+    {
+        direction = reflect(direction, float2(-1.0f, 0.0f));
+        AgentDirections[id.x] = atan2(direction.y, direction.x);
+        numupdates += 1;
+    }
+    
+    if (newPosition.y <= 0)
+    {
+        direction = reflect(direction, float2(0.0f, 1.0f));
+        AgentDirections[id.x] = atan2(direction.y, direction.x);
+        numupdates += 1;
+    }
+    else if (newPosition.y >= ImageY - 1)
+    {
+        direction = reflect(direction, float2(0.0f, -1.0f));
+        AgentDirections[id.x] = atan2(direction.y, direction.x);
+        numupdates += 1;
+    }
+    
+    // Special Bounds case - we hit a corner
+    // Also update the position to a new position
+    if (numupdates > 0)
+    {
+        if (numupdates > 1)
+        {
+            // we hit a corner
+            direction = normalize(float2(ImageX, ImageY) / 2 - AgentPositions[id.x]);
+            AgentDirections[id.x] = atan2(direction.y, direction.x);
+        }
+        
+        newPosition = AgentPositions[id.x] + direction * AgentSpeed * DeltaTime;
+    }
+    
+    // Apply the agent's movement
+    AgentPositions[id.x] = newPosition;
+    
+    // Calculate the direction for the next movement
+    float angle = AgentDirections[id.x];
+    float2 leftPosition = AgentPositions[id.x] + float2(cos(angle + 0.4f), sin(angle + 0.4f)) * AgentSpeed * DeltaTime;
+    float2 forwardPosition = AgentPositions[id.x] + float2(cos(angle), sin(angle)) * AgentSpeed * DeltaTime;
+    float2 rightPosition = AgentPositions[id.x] + float2(cos(angle - 0.4f), sin(angle - 0.4f)) * AgentSpeed * DeltaTime;
+    
+    float3 samples = normalize(float3(PrevCycle[floor(leftPosition)].r, PrevCycle[floor(forwardPosition)].r, PrevCycle[floor(rightPosition)].r));
+    float deltaRot = 2.f * (random(id.xy) - 0.5f); //if nothing else, move forward randomly a bit
+    if (samples.x > samples.y && samples.x > samples.z)
+    {
+        deltaRot += 0.3f;
+    }
+    else if (samples.z > samples.x && samples.z > samples.y)
+    {
+        deltaRot -= 0.3f;
+    }
+    AgentDirections[id.x] += deltaRot;
+    
+
+}
+
+[numthreads(8, 8, 1)]
+void Blur(uint3 id : SV_DispatchThreadID)
+{
+    // Dont run the kernel if we are off screen
+    if (id.x >= ImageX || id.y >= ImageY || id.x < 0 || id.y < 0)
+        return; 
+
+    //run a 3x3 kernel to blur the image
+    float4 average = float4(0.0f, 0.0f, 0.0f, 1.0f);
+    int numpixels = 0;
+    
+    for (int y = -KERNEL_SIZE / 2; y <= KERNEL_SIZE / 2; y++)
+    {
+        for (int x = -KERNEL_SIZE / 2; x <= KERNEL_SIZE / 2; x++)
+        {
+            if (id.x + x < 0 || id.y + y < 0 || id.x + x >= ImageX || id.y + y >= ImageY)
+                continue;
+            
+            average += ToBlur[uint2(x + id.x, y + id.y)];
+            
+            numpixels += 1;
+        }
+    }
+    
+    average = average / numpixels;
+    
+    BlurResult[id.xy] = float4(average.rgb, 1.0f);
+
+}
+
+[numthreads(8, 8, 1)]
+void UpdateTexture(uint3 id : SV_DispatchThreadID)
+{
+    // Make sure this kernel is executing a valid item
+    if (id.x < 0 || id.y < 0 || id.x >= ImageX || id.y >= ImageY)
+        return;
+
+    // Determine the color for this pixel
+    // Step 1: Evaporate any color on this tile
+    float3 color = float3(max(0.f, PrevCycle[id.xy].r - DeltaTime * EvaporationSpeed), max(0.f, PrevCycle[id.xy].g - DeltaTime * EvaporationSpeed), max(0.f, PrevCycle[id.xy].b - DeltaTime * EvaporationSpeed));
+    
+    // Step 2: If there is an agent on this tile set the color to full
+    for (uint i = 0; i < NumAgents; i++)
+    {
+        float2 cellpos = floor(AgentPositions[i]);
+        if (cellpos.x == id.x && cellpos.y == id.y)
+        {
+            color = float3(1.0f, 1.0f, 1.0f);
+            break;
+        }
+
+    }
+    
+    // Finally, write this color to the output texture
+    OutputTex[id.xy] = float4(color.rgb, 1.0f);
+}
+
+float random(float2 p)
+{
+    float2 K1 = float2(
+        23.14069263277926f, // e^pi (Gelfond's constant)
+         2.665144142690225f // 2^sqrt(2) (Gelfond–Schneider constant)
+    );
+    return frac(cos(dot(p, K1)) * 12345.6789);
+}

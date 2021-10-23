@@ -1,0 +1,69 @@
+// Define constants for shader modifiers (we could pass them in but why bother)
+#pragma kernel GenerateVoronoi
+
+// Define constants for shader modifiers (we could pass them in but why bother)
+#define KERNEL_SIZE 1
+
+// Prototypes
+float manhattan_distance(float2 a, float2 b);
+float minkowski_distance(float2 a, float2 b, float exponent);
+
+// Render Arguments
+uint ImageX;
+uint ImageY;
+
+// Agent Arguments
+uint NumPoints;
+RWStructuredBuffer<float2> NodePositions;
+RWStructuredBuffer<float4> NodeColors;
+
+// Texture Arguments
+RWTexture2D<float4> OutputTexture;
+
+// Graphical Arguments
+float NormalizedDistance;
+float PointSize;
+float DistanceExp;
+
+[numthreads(1, 1, 1)]
+void GenerateVoronoi(uint3 id : SV_DispatchThreadID)
+{
+    // Step 0: Make sure we are currently in bounds of the texture
+    if (id.x >= ImageX || id.y >= ImageY || id.x < 0 || id.y < 0)
+        return;
+    
+    // Step 1: Find the closest point for this pixel
+    float closestDistance = minkowski_distance(NodePositions[0], float2(id.x, id.y), DistanceExp);
+    int closestPointIndex = 0;
+    for (uint i = 1; i < NumPoints; i++)
+    {
+        float newDistance = minkowski_distance(NodePositions[i], float2(id.x, id.y), DistanceExp);
+        if (newDistance < closestDistance)
+        {
+            closestDistance = newDistance;
+            closestPointIndex = i;
+        }
+    }
+    
+    // Step 2: If we are near to a point, mark this point. Otherwise, color it accordingly.
+    if (closestDistance < PointSize)
+    {
+        OutputTexture[id.xy] = float4(0, 0, 0, 1);
+    }
+    else
+    {
+        float distNormalized = clamp(closestDistance / NormalizedDistance, 0.0f, 1.0f);
+        OutputTexture[id.xy] = lerp(NodeColors[closestPointIndex], float4(0, 0, 0, 1), distNormalized);
+    }
+}
+
+float manhattan_distance(float2 a, float2 b)
+{
+    return abs(a.x - b.x) + abs(a.y - b.y);
+}
+
+float minkowski_distance(float2 a, float2 b, float exponent)
+{
+    return pow(pow(abs(a.x - b.x), exponent) + pow(abs(a.y - b.y), exponent), 1 / exponent);
+
+}
